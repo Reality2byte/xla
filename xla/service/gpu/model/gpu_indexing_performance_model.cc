@@ -802,22 +802,23 @@ GpuPerformanceModelWithIndexingAnalysis::TryFindTopKBestTilingsForFusion(
     using experimental::TiledHloComputation;
     using experimental::TilingSpace;
 
-    ABSL_ASSIGN_OR_RETURN(std::unique_ptr<TilingSpace> tiling_space,
+    ABSL_ASSIGN_OR_RETURN(std::unique_ptr<TilingSpace> base_tiling_space,
                      TilingSpace::Create(fusion_adaptor, mlir_context_));
 
-    ABSL_ASSIGN_OR_RETURN(auto tilings, tiling_space->GetValidTilings());
+    ABSL_ASSIGN_OR_RETURN(auto tilings, base_tiling_space->GetValidTilings());
     VLOG(1) << absl::StrCat(
         "TryFindTopKBestTilingsForFusion tiling_space evaluating ",
         tilings.size(), " tilings.");
 
     for (const llvm::SmallVector<int64_t, 4>& tiling : tilings) {
-      ABSL_ASSIGN_OR_RETURN(std::unique_ptr<TilingSpace> tiling_space,
-                       TilingSpace::Create(fusion_adaptor, mlir_context_));
-
       // Assign padded tile size as Triton emitter will require that.
       // Symbolic analysis route hides this assumption.
       llvm::SmallVector<int64_t, 4> padded_tile_sizes =
           xla::xtile::GetPaddedTileSizes(tiling);
+
+      // Cloning is faster than calling TilingSpace::Create() for each
+      // tiling candidate.
+      std::unique_ptr<TilingSpace> tiling_space = base_tiling_space->Clone();
       ABSL_RETURN_IF_ERROR(tiling_space->AssignTileSizes(padded_tile_sizes));
       VLOG(3) << "Trying tile sizes " << absl::StrJoin(padded_tile_sizes, ",");
 
