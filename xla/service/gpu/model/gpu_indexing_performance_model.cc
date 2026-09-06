@@ -18,6 +18,7 @@ limitations under the License.
 #include <algorithm>
 #include <cstdint>
 #include <functional>
+#include <limits>
 #include <memory>
 #include <optional>
 #include <string>
@@ -259,6 +260,32 @@ bool DoesComputationFitInRegisters(
         }
       });
   return fits;
+}
+
+// Checks if the candidate root tile sizes fit in registers before
+// constructing the tiled computation.
+bool DoesTilingFitInRegisters(const HloFusionAdaptor& fusion_adaptor,
+                              const experimental::TilingSpace& tiling_space,
+                              absl::Span<const int64_t> padded_tile_sizes,
+                              const se::DeviceDescription& device_info) {
+  for (const HloInstructionAdaptor& root : fusion_adaptor.GetRoots()) {
+    int64_t root_tile_size = 1;
+    for (auto [index, dim] : llvm::enumerate(
+             experimental::GetFirstShape(&root.instruction()).dimensions())) {
+      int64_t dim_id =
+          tiling_space.GetDimensionInfo(root.instruction(), index).id.value();
+      int64_t tile_size = padded_tile_sizes[dim_id];
+      if (tile_size > 0 &&
+          root_tile_size > std::numeric_limits<int64_t>::max() / tile_size) {
+        return false;
+      }
+      root_tile_size *= tile_size;
+    }
+    if (!DoesTileFitInRegisters(root_tile_size, device_info)) {
+      return false;
+    }
+  }
+  return true;
 }
 
 // Returns the number of warps to use based on the largest tile size in the
@@ -815,6 +842,23 @@ GpuPerformanceModelWithIndexingAnalysis::TryFindTopKBestTilingsForFusion(
       // Symbolic analysis route hides this assumption.
       llvm::SmallVector<int64_t, 4> padded_tile_sizes =
           xla::xtile::GetPaddedTileSizes(tiling);
+
+      // Early pruning invalid candidates as an optimization.
+      if (Decision decision = experimental::VerifySubsetOfTritonConstraints(
+              padded_tile_sizes, *base_tiling_space, *device_info_);
+          !decision) {
+        VLOG(3) << "Pre-filtering candidate violating Triton constraints: "
+                << absl::StrJoin(padded_tile_sizes, ",") << ": "
+                << decision.Explain();
+        continue;
+      }
+
+      if (!DoesTilingFitInRegisters(fusion_adaptor, *base_tiling_space,
+                                    padded_tile_sizes, *device_info_)) {
+        VLOG(3) << "Pre-filtering candidate exceeding register limit: "
+                << absl::StrJoin(padded_tile_sizes, ",");
+        continue;
+      }
 
       // Cloning is faster than calling TilingSpace::Create() for each
       // tiling candidate.
